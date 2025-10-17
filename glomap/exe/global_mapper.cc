@@ -1,15 +1,57 @@
 #include "glomap/controllers/global_mapper.h"
 
+#include "glomap/controllers/global_mapper_lidar.h"
 #include "glomap/controllers/option_manager.h"
 #include "glomap/io/colmap_io.h"
 #include "glomap/types.h"
 
+#include <colmap/scene/reconstruction.h>
+#include <colmap/util/endian.h>
 #include <colmap/util/file.h>
 #include <colmap/util/misc.h>
 #include <colmap/util/timer.h>
 
 namespace glomap {
 namespace {
+
+std::vector<Point> ReadPoints3D(const std::string& path) {
+  std::ifstream stream(path, std::ios::binary);
+  THROW_CHECK_FILE_OPEN(stream, path);
+  const size_t num_points3D = colmap::ReadBinaryLittleEndian<uint64_t>(&stream);
+  std::vector<Point> points3D;
+  points3D.reserve(num_points3D);
+  for (size_t i = 0; i < num_points3D; ++i) {
+    colmap::Point3D point3D;
+
+    const colmap::point3D_t point3D_id =
+        colmap::ReadBinaryLittleEndian<colmap::point3D_t>(&stream);
+
+    point3D.xyz(0) = colmap::ReadBinaryLittleEndian<double>(&stream);
+    point3D.xyz(1) = colmap::ReadBinaryLittleEndian<double>(&stream);
+    point3D.xyz(2) = colmap::ReadBinaryLittleEndian<double>(&stream);
+    point3D.color(0) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
+    point3D.color(1) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
+    point3D.color(2) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
+    point3D.error = colmap::ReadBinaryLittleEndian<double>(&stream);
+    const size_t track_length =
+        colmap::ReadBinaryLittleEndian<uint64_t>(&stream);
+    for (size_t j = 0; j < track_length; ++j) {
+      const colmap::image_t image_id =
+          colmap::ReadBinaryLittleEndian<colmap::image_t>(&stream);
+      const colmap::point2D_t point2D_idx =
+          colmap::ReadBinaryLittleEndian<colmap::point2D_t>(&stream);
+      // point3D.track.AddElement(image_id, point2D_idx);
+    }
+    // point3D.track.Compress();
+
+    // Convert to glomap::Point (position only)
+    points3D.emplace_back(
+        Point(Eigen::Vector3d(point3D.xyz(0), point3D.xyz(1), point3D.xyz(2)),
+              Eigen::Vector3d::Zero()));
+  }
+  return points3D;
+}
+
 void UpdateDatabasePosePriorsCovariance(colmap::Database& database,
                                         const Eigen::Matrix3d& covariance) {
   colmap::DatabaseTransaction database_transaction(&database);
@@ -174,6 +216,68 @@ int RunMapperResume(int argc, char** argv) {
   colmap::Timer run_timer;
   run_timer.Start();
   global_mapper.Solve(database, view_graph, cameras, images, tracks);
+  run_timer.Pause();
+
+  LOG(INFO) << "Reconstruction done in " << run_timer.ElapsedSeconds()
+            << " seconds";
+
+  WriteGlomapReconstruction(
+      output_path, cameras, images, tracks, output_format, image_path);
+  LOG(INFO) << "Export to COLMAP reconstruction done";
+
+  return EXIT_SUCCESS;
+}
+
+// -------------------------------------
+// Mappers starting from COLMAP reconstruction and LiDAR
+// -------------------------------------
+int RunMapperLidar(int argc, char** argv) {
+  std::string input_path;
+  std::string lidar_path;
+  std::string output_path;
+  std::string image_path = "";
+  std::string output_format = "bin";
+
+  OptionManager options;
+  options.AddRequiredOption("input_path", &input_path);
+  options.AddRequiredOption("lidar_path", &lidar_path);
+  options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("image_path", &image_path);
+  options.AddDefaultOption("output_format", &output_format, "{bin, txt}");
+  options.AddGlobalMapperResumeFullOptions();
+
+  options.Parse(argc, argv);
+
+  if (!colmap::ExistsDir(input_path)) {
+    LOG(ERROR) << "`input_path` is not a directory";
+    return EXIT_FAILURE;
+  }
+
+  // Check whether output_format is valid
+  if (output_format != "bin" && output_format != "txt") {
+    LOG(ERROR) << "Invalid output format";
+    return EXIT_FAILURE;
+  }
+
+  // Load the reconstruction
+  ViewGraph view_graph;       // dummy variable
+  colmap::Database database;  // dummy variable
+
+  std::unordered_map<camera_t, Camera> cameras;
+  std::unordered_map<image_t, Image> images;
+  std::unordered_map<track_t, Track> tracks;
+  colmap::Reconstruction reconstruction;
+  reconstruction.Read(input_path);
+  ConvertColmapToGlomap(reconstruction, cameras, images, tracks);
+
+  std::vector<Point> points = ReadPoints3D(lidar_path);
+
+  GlobalLidarMapper global_mapper(*options.mapper);
+
+  // Main solver
+  colmap::Timer run_timer;
+  run_timer.Start();
+  global_mapper.Solve(database, view_graph, cameras, images, points, tracks);
   run_timer.Pause();
 
   LOG(INFO) << "Reconstruction done in " << run_timer.ElapsedSeconds()

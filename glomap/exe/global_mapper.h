@@ -10,4 +10,6 @@ int RunMapper(int argc, char** argv);
 // Use default values for most of the settings from colmap reconstruction
 int RunMapperResume(int argc, char** argv);
 
+int RunMapperLidar(int argc, char** argv);
+
 }  // namespace glomap

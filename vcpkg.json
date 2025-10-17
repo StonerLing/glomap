@@ -17,7 +17,8 @@
             "features": [
                 "lapack",
                 "schur",
-                "suitesparse"
+                "suitesparse",
+                "cuda"
             ]
         },
         "eigen3",

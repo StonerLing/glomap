@@ -1,5 +1,6 @@
 set(SOURCES
     controllers/global_mapper.cc
+    controllers/global_mapper_lidar.cc
     controllers/option_manager.cc
     controllers/rotation_averager.cc
     controllers/track_establishment.cc
@@ -30,6 +31,7 @@ set(SOURCES
 
 set(HEADERS
     controllers/global_mapper.h
+    controllers/global_mapper_lidar.h
     controllers/option_manager.h
     controllers/rotation_averager.h
     controllers/track_establishment.h
@@ -62,6 +64,7 @@ set(HEADERS
     scene/camera.h
     scene/image_pair.h
     scene/image.h
+    scene/point.h
     scene/track.h
     scene/types_sfm.h
     scene/types.h

@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
   std::vector<std::pair<std::string, command_func_t>> commands;
   commands.emplace_back("mapper", &glomap::RunMapper);
   commands.emplace_back("mapper_resume", &glomap::RunMapperResume);
+  commands.emplace_back("mapper_lidar", &glomap::RunMapperLidar);
   commands.emplace_back("rotation_averager", &glomap::RunRotationAverager);
 
   if (argc == 1) {
