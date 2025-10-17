@@ -29,9 +29,9 @@ void RestoreTranslationToPriorPosition(
   }
 }
 
-PosePriorBundleAdjusterOptions ExtractPosePriorBAOptions(
+LidarPriorBundleAdjusterOptions ExtractPosePriorBAOptions(
     const GlobalMapperOptions& options) {
-  PosePriorBundleAdjusterOptions pose_prior_options(
+  LidarPriorBundleAdjusterOptions pose_prior_options(
       options.opt_pose_prior.use_robust_loss_on_prior_position,
       options.opt_pose_prior.prior_position_loss_threshold,
       options.opt_pose_prior.prior_position_scaled_loss_factor,
@@ -226,9 +226,9 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       std::unique_ptr<BundleAdjuster> ba_engine;
 
       if (options_.opt_pose_prior.use_pose_position_prior) {
-        PosePriorBundleAdjusterOptions opt_prior_ba =
+        LidarPriorBundleAdjusterOptions opt_prior_ba =
             ExtractPosePriorBAOptions(options_);
-        ba_engine = std::make_unique<PosePriorBundleAdjuster>(options_.opt_ba,
+        ba_engine = std::make_unique<LidarPriorBundleAdjuster>(options_.opt_ba,
                                                               opt_prior_ba);
       } else {
         ba_engine = std::make_unique<BundleAdjuster>(options_.opt_ba);
@@ -332,9 +332,9 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       std::unique_ptr<BundleAdjuster> ba_engine;
 
       if (options_.opt_pose_prior.use_pose_position_prior) {
-        PosePriorBundleAdjusterOptions pose_prior_ba_options =
+        LidarPriorBundleAdjusterOptions pose_prior_ba_options =
             ExtractPosePriorBAOptions(options_);
-        ba_engine = std::make_unique<PosePriorBundleAdjuster>(
+        ba_engine = std::make_unique<LidarPriorBundleAdjuster>(
             options_.opt_ba, pose_prior_ba_options);
       } else {
         ba_engine = std::make_unique<BundleAdjuster>(options_.opt_ba);

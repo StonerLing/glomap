@@ -248,6 +248,8 @@ int RunMapperLidar(int argc, char** argv) {
 
   options.Parse(argc, argv);
 
+  options.mapper->skip_global_positioning = true;
+
   if (!colmap::ExistsDir(input_path)) {
     LOG(ERROR) << "`input_path` is not a directory";
     return EXIT_FAILURE;

@@ -143,4 +143,65 @@ class PosePriorBundleAdjuster : public BundleAdjuster {
   PosePriorBundleAdjusterOptions prior_options_;
   std::unordered_map<image_t, PosePrior> pose_priors_;
 };
+
+struct LidarPriorBundleAdjusterOptions {
+  // Whether to use a robust loss on prior locations.
+  bool use_robust_loss_on_prior_position = false;
+
+  // Threshold on the residual for the robust loss
+  // (chi2 for 3DoF at 95% = 7.815).
+  double prior_position_loss_threshold = 7.815;
+
+  // The factor used by ceres::ScaledLoss to scale the loss function applied to
+  // prior position residuals.
+  double prior_position_scaled_loss_factor = 1.;
+
+  // Maximum RANSAC error for Sim3 alignment.
+  double ransac_max_error = 0.;
+
+  // Loss function for pose prior.
+  std::shared_ptr<ceres::LossFunction> prior_position_loss_function;
+
+  LidarPriorBundleAdjusterOptions(bool use_robust_loss,
+                                 double loss_scale,
+                                 double scaled_loss_factor,
+                                 double max_error)
+      : use_robust_loss_on_prior_position(use_robust_loss),
+        prior_position_loss_threshold(loss_scale),
+        prior_position_scaled_loss_factor(scaled_loss_factor),
+        ransac_max_error(max_error) {};
+};
+
+
+class LidarPriorBundleAdjuster : public BundleAdjuster {
+ public:
+  using Sim3d = colmap::Sim3d;
+  using PosePrior = colmap::PosePrior;
+
+  explicit LidarPriorBundleAdjuster(
+      const BundleAdjusterOptions& options,
+      const LidarPriorBundleAdjusterOptions& prior_options);
+  virtual ~LidarPriorBundleAdjuster() = default;
+
+  bool Solve(const ViewGraph& view_graph,
+             std::unordered_map<camera_t, Camera>& cameras,
+             std::unordered_map<image_t, Image>& images,
+             std::unordered_map<track_t, Track>& tracks) override;
+
+ protected:
+  // Allign the reconstruction to pose position priors.
+  bool AlignReconstruction(
+      const std::unordered_map<image_t, PosePrior>& pose_priors,
+      std::unordered_map<image_t, Image>& images,
+      std::unordered_map<track_t, Track>& tracks);
+
+  // Add pose position prior constraints to the problem.
+  void AddPosePositionPriorConstraints(
+      const std::unordered_map<image_t, PosePrior>& pose_priors,
+      const Sim3d& normalized_from_metric,
+      std::unordered_map<image_t, Image>& images);
+
+  LidarPriorBundleAdjusterOptions prior_options_;
+  std::unordered_map<image_t, PosePrior> pose_priors_;
+};
 }  // namespace glomap
