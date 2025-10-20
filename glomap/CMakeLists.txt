@@ -14,6 +14,7 @@ set(SOURCES
     io/colmap_converter.cc
     io/colmap_io.cc
     io/pose_io.cc
+    io/tinyply.cc
     math/gravity.cc
     math/rigid3d.cc
     math/tree.cc
@@ -47,6 +48,7 @@ set(HEADERS
     io/colmap_converter.h
     io/colmap_io.h
     io/pose_io.h
+    io/tinyply.h
     math/gravity.h
     math/l1_solver.h
     math/rigid3d.h
@@ -89,6 +91,7 @@ target_link_libraries(
         Eigen3::Eigen
         Ceres::ceres
         SuiteSparse::CHOLMOD
+        nanoflann::nanoflann
         ${BOOST_LIBRARIES}
 )
 target_include_directories(glomap PUBLIC ..)

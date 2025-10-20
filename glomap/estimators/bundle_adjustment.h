@@ -7,6 +7,8 @@
 #include <colmap/geometry/sim3.h>
 
 #include <ceres/ceres.h>
+#include <nanoflann.hpp>
+#include <fstream>
 
 namespace glomap {
 
@@ -160,18 +162,17 @@ struct LidarPriorBundleAdjusterOptions {
   double ransac_max_error = 0.;
 
   // Loss function for pose prior.
-  std::shared_ptr<ceres::LossFunction> prior_position_loss_function;
+  std::shared_ptr<ceres::LossFunction> prior_lidar_loss_function;
 
   LidarPriorBundleAdjusterOptions(bool use_robust_loss,
-                                 double loss_scale,
-                                 double scaled_loss_factor,
-                                 double max_error)
+                                  double loss_scale,
+                                  double scaled_loss_factor,
+                                  double max_error)
       : use_robust_loss_on_prior_position(use_robust_loss),
         prior_position_loss_threshold(loss_scale),
         prior_position_scaled_loss_factor(scaled_loss_factor),
         ransac_max_error(max_error) {};
 };
-
 
 class LidarPriorBundleAdjuster : public BundleAdjuster {
  public:
@@ -183,10 +184,11 @@ class LidarPriorBundleAdjuster : public BundleAdjuster {
       const LidarPriorBundleAdjusterOptions& prior_options);
   virtual ~LidarPriorBundleAdjuster() = default;
 
-  bool Solve(const ViewGraph& view_graph,
-             std::unordered_map<camera_t, Camera>& cameras,
-             std::unordered_map<image_t, Image>& images,
-             std::unordered_map<track_t, Track>& tracks) override;
+  bool SolveLidar(const ViewGraph& view_graph,
+                  std::unordered_map<camera_t, Camera>& cameras,
+                  std::unordered_map<image_t, Image>& images,
+                  std::vector<Point> points3D,
+                  std::unordered_map<track_t, Track>& tracks);
 
  protected:
   // Allign the reconstruction to pose position priors.
@@ -196,12 +198,12 @@ class LidarPriorBundleAdjuster : public BundleAdjuster {
       std::unordered_map<track_t, Track>& tracks);
 
   // Add pose position prior constraints to the problem.
-  void AddPosePositionPriorConstraints(
-      const std::unordered_map<image_t, PosePrior>& pose_priors,
+  void AddLidarPositionPriorConstraints(
+      const std::vector<Point> points3D,
       const Sim3d& normalized_from_metric,
-      std::unordered_map<image_t, Image>& images);
+      std::unordered_map<track_t, Track>& tracks);
 
-  LidarPriorBundleAdjusterOptions prior_options_;
+  LidarPriorBundleAdjusterOptions lidar_options_;
   std::unordered_map<image_t, PosePrior> pose_priors_;
 };
 }  // namespace glomap

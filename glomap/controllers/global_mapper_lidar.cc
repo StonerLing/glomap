@@ -223,23 +223,29 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
     run_timer.Start();
 
     for (int ite = 0; ite < options_.num_iteration_bundle_adjustment; ite++) {
-      std::unique_ptr<BundleAdjuster> ba_engine;
+    // for (int ite = 0; ite < 1; ite++) {
+      std::unique_ptr<LidarPriorBundleAdjuster> ba_engine;
 
-      if (options_.opt_pose_prior.use_pose_position_prior) {
-        LidarPriorBundleAdjusterOptions opt_prior_ba =
-            ExtractPosePriorBAOptions(options_);
-        ba_engine = std::make_unique<LidarPriorBundleAdjuster>(options_.opt_ba,
-                                                              opt_prior_ba);
-      } else {
-        ba_engine = std::make_unique<BundleAdjuster>(options_.opt_ba);
-      }
+      // if (options_.opt_pose_prior.use_pose_position_prior) {
+      //   LidarPriorBundleAdjusterOptions opt_prior_ba =
+      //       ExtractPosePriorBAOptions(options_);
+      //   ba_engine = std::make_unique<LidarPriorBundleAdjuster>(options_.opt_ba,
+      //                                                          opt_prior_ba);
+      // } else {
+      //   ba_engine = std::make_unique<BundleAdjuster>(options_.opt_ba);
+      // }
+
+      LidarPriorBundleAdjusterOptions opt_prior_ba =
+          ExtractPosePriorBAOptions(options_);
+      ba_engine = std::make_unique<LidarPriorBundleAdjuster>(options_.opt_ba,
+                                                             opt_prior_ba);
 
       BundleAdjusterOptions& ba_engine_options_inner = ba_engine->GetOptions();
 
       // Staged bundle adjustment
       // 6.1. First stage: optimize positions only
       ba_engine_options_inner.optimize_rotations = false;
-      if (!ba_engine->Solve(view_graph, cameras, images, tracks)) {
+      if (!ba_engine->SolveLidar(view_graph, cameras, images, points3D, tracks)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -251,7 +257,7 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       ba_engine_options_inner.optimize_rotations =
           options_.opt_ba.optimize_rotations;
       if (ba_engine_options_inner.optimize_rotations &&
-          !ba_engine->Solve(view_graph, cameras, images, tracks)) {
+          !ba_engine->SolveLidar(view_graph, cameras, images, points3D, tracks)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -260,11 +266,6 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       if (ite != options_.num_iteration_bundle_adjustment - 1)
         run_timer.PrintSeconds();
 
-      // Normalize the structure if do not use prior position.
-      if (!options_.opt_pose_prior.use_pose_position_prior) {
-        NormalizeReconstruction(cameras, images, tracks);
-      }
-
       // 6.3. Filter tracks based on the estimation
       // For the filtering, in each round, the criteria for outlier is
       // tightened. If only few tracks are changed, no need to start bundle
@@ -272,26 +273,26 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       UndistortImages(cameras, images, true);
       LOG(INFO) << "Filtering tracks by reprojection ...";
 
-      bool status = true;
-      size_t filtered_num = 0;
-      while (status && ite < options_.num_iteration_bundle_adjustment) {
-        double scaling = std::max(3 - ite, 1);
-        filtered_num += TrackFilter::FilterTracksByReprojection(
-            view_graph,
-            cameras,
-            images,
-            tracks,
-            scaling * options_.inlier_thresholds.max_reprojection_error);
+      // bool status = true;
+      // size_t filtered_num = 0;
+      // while (status && ite < options_.num_iteration_bundle_adjustment) {
+      //   double scaling = std::max(3 - ite, 1);
+      //   filtered_num += TrackFilter::FilterTracksByReprojection(
+      //       view_graph,
+      //       cameras,
+      //       images,
+      //       tracks,
+      //       scaling * options_.inlier_thresholds.max_reprojection_error);
 
-        if (filtered_num > 1e-3 * tracks.size()) {
-          status = false;
-        } else
-          ite++;
-      }
-      if (status) {
-        LOG(INFO) << "fewer than 0.1% tracks are filtered, stop the iteration.";
-        break;
-      }
+      //   if (filtered_num > 1e-3 * tracks.size()) {
+      //     status = false;
+      //   } else
+      //     ite++;
+      // }
+      // if (status) {
+      //   LOG(INFO) << "fewer than 0.1% tracks are filtered, stop the iteration.";
+      //   break;
+      // }
     }
 
     // Filter tracks based on the estimation

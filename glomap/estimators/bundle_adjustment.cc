@@ -1,5 +1,6 @@
 #include "bundle_adjustment.h"
 
+#include "glomap/io/tinyply.h"
 #include "glomap/processors/reconstruction_aligner.h"
 #include "glomap/processors/reconstruction_normalizer.h"
 
@@ -438,32 +439,31 @@ void PosePriorBundleAdjuster::AddPosePositionPriorConstraints(
   }
 }
 
-
-
 LidarPriorBundleAdjuster::LidarPriorBundleAdjuster(
     const BundleAdjusterOptions& options,
-    const LidarPriorBundleAdjusterOptions& prior_options)
-    : BundleAdjuster(options), prior_options_(prior_options) {
-  if (prior_options_.use_robust_loss_on_prior_position) {
-    prior_options_.prior_position_loss_function =
+    const LidarPriorBundleAdjusterOptions& lidar_options)
+    : BundleAdjuster(options), lidar_options_(lidar_options) {
+  if (lidar_options_.use_robust_loss_on_prior_position) {
+    lidar_options_.prior_lidar_loss_function =
         std::make_shared<ceres::ScaledLoss>(
-            new ceres::CauchyLoss(prior_options_.prior_position_loss_threshold),
-            prior_options_.prior_position_scaled_loss_factor,
+            new ceres::CauchyLoss(lidar_options_.prior_position_loss_threshold),
+            lidar_options_.prior_position_scaled_loss_factor,
             ceres::DO_NOT_TAKE_OWNERSHIP);
   } else {
     // nullptr for loss function means identity loss.
-    prior_options_.prior_position_loss_function =
+    lidar_options_.prior_lidar_loss_function =
         std::make_shared<ceres::ScaledLoss>(
             nullptr,
-            prior_options_.prior_position_scaled_loss_factor,
+            lidar_options_.prior_position_scaled_loss_factor,
             ceres::DO_NOT_TAKE_OWNERSHIP);
   }
 }
 
-bool LidarPriorBundleAdjuster::Solve(
+bool LidarPriorBundleAdjuster::SolveLidar(
     const ViewGraph& view_graph,
     std::unordered_map<camera_t, Camera>& cameras,
     std::unordered_map<image_t, Image>& images,
+    std::vector<Point> points3D,
     std::unordered_map<track_t, Track>& tracks) {
   // Check if the input data is valid
   if (images.empty()) {
@@ -475,26 +475,21 @@ bool LidarPriorBundleAdjuster::Solve(
     return false;
   }
 
-  // Extracts all valid pose priors from images
-  pose_priors_ = ExtractsValidPosePriorsFromImgaes(images);
-
   // Reset the problem
   Reset();
 
   // Try to align the reconstruction to pose position prior
-  const bool use_prior_position =
-      AlignReconstruction(pose_priors_, images, tracks);
+  constexpr bool use_prior_lidar = true;
 
   // Add the constraints that the point tracks impose on the problem
   AddPointToCameraConstraints(view_graph, cameras, images, tracks);
 
   Sim3d normalized_from_metric;
-  if (use_prior_position) {
+  if (use_prior_lidar) {
     normalized_from_metric =
-        NormalizeReconstruction(cameras, images, tracks, true);
+        NormalizeReconstruction(cameras, images, tracks, false);
 
-    AddPosePositionPriorConstraints(
-        pose_priors_, normalized_from_metric, images);
+    AddLidarPositionPriorConstraints(points3D, normalized_from_metric, tracks);
   }
 
   // Add the cameras and points to the parameter groups for schur-based
@@ -504,14 +499,14 @@ bool LidarPriorBundleAdjuster::Solve(
   // Parameterize the variables
   ParameterizeVariables(cameras, images, tracks);
 
-  // If we confirm to optimize translation with prior position, than make sure
-  // all translations are variable.
-  if (use_prior_position && options_.optimize_translation) {
-    std::for_each(images.begin(), images.end(), [&](auto& id_image_pair) {
-      problem_->SetParameterBlockVariable(
-          id_image_pair.second.cam_from_world.translation.data());
+  // If we confirm to optimize with LIDAR prior, make sure all track points
+  // are variable
+  if (use_prior_lidar && options_.optimize_points) {
+    std::for_each(tracks.begin(), tracks.end(), [&](auto& id_track_pair) {
+      if (problem_->HasParameterBlock(id_track_pair.second.xyz.data())) {
+        problem_->SetParameterBlockVariable(id_track_pair.second.xyz.data());
+      }
     });
-    ;
   }
 
   // Set the solver options.
@@ -529,7 +524,7 @@ bool LidarPriorBundleAdjuster::Solve(
     LOG(INFO) << summary.BriefReport();
 
   // Transform the reconstruction back.
-  if (use_prior_position) {
+  if (use_prior_lidar) {
     DenormalizeReconstruction(normalized_from_metric, images, tracks);
   }
   return summary.IsSolutionUsable();
@@ -540,8 +535,8 @@ bool LidarPriorBundleAdjuster::AlignReconstruction(
     std::unordered_map<image_t, Image>& images,
     std::unordered_map<track_t, Track>& tracks) {
   double max_error = -1;
-  if (prior_options_.ransac_max_error > 0) {
-    max_error = prior_options_.ransac_max_error;
+  if (lidar_options_.ransac_max_error > 0) {
+    max_error = lidar_options_.ransac_max_error;
   } else {
     double max_stddev_sum = 0;
     size_t num_valid_covs = 0;
@@ -569,30 +564,269 @@ bool LidarPriorBundleAdjuster::AlignReconstruction(
   ;
 }
 
-void LidarPriorBundleAdjuster::AddPosePositionPriorConstraints(
-    const std::unordered_map<image_t, colmap::PosePrior>& pose_priors,
+namespace {
+// Adaptor class for nanoflann
+struct PointCloudAdaptor {
+  const std::vector<Point>& points;
+
+  PointCloudAdaptor(const std::vector<Point>& pts) : points(pts) {}
+
+  inline size_t kdtree_get_point_count() const { return points.size(); }
+
+  inline double kdtree_get_pt(const size_t idx, const size_t dim) const {
+    return points[idx].position[dim];
+  }
+
+  template <class BBOX>
+  bool kdtree_get_bbox(BBOX&) const {
+    return false;
+  }
+};
+}  // namespace
+
+// Point-to-point cost functor for LIDAR constraints
+struct PointToPointCostFunctor {
+  PointToPointCostFunctor(const Eigen::Vector3d& lidar_point,
+                          double weight = 1.0)
+      : lidar_point_(lidar_point), weight_(weight) {}
+
+  template <typename T>
+  bool operator()(const T* const track_point, T* residuals) const {
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> residual(residuals);
+    residual =
+        weight_ * (Eigen::Map<const Eigen::Matrix<T, 3, 1>>(track_point) -
+                   lidar_point_.cast<T>());
+    return true;
+  }
+
+  static ceres::CostFunction* Create(const Eigen::Vector3d& lidar_point,
+                                     double weight = 1.0) {
+    return new ceres::AutoDiffCostFunction<PointToPointCostFunctor, 3, 3>(
+        new PointToPointCostFunctor(lidar_point, weight));
+  }
+
+  Eigen::Vector3d lidar_point_;
+  double weight_;
+};
+
+// Point-to-plane cost functor for LIDAR constraints
+struct PointToPlaneCostFunctor {
+  PointToPlaneCostFunctor(const Eigen::Vector3d& lidar_point,
+                          const Eigen::Vector3d& lidar_normal,
+                          double weight = 1.0)
+      : lidar_point_(lidar_point),
+        lidar_normal_(lidar_normal),
+        weight_(weight) {}
+
+  template <typename T>
+  bool operator()(const T* const track_point, T* residuals) const {
+    Eigen::Matrix<T, 3, 1> point_diff =
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>>(track_point) -
+        lidar_point_.cast<T>();
+    residuals[0] = weight_ * point_diff.dot(lidar_normal_.cast<T>());
+    // weight_ * ceres::abs(point_diff.dot(lidar_normal_.cast<T>()));
+    return true;
+  }
+
+  static ceres::CostFunction* Create(const Eigen::Vector3d& lidar_point,
+                                     const Eigen::Vector3d& lidar_normal,
+                                     double weight = 1.0) {
+    return new ceres::AutoDiffCostFunction<PointToPlaneCostFunctor, 1, 3>(
+        new PointToPlaneCostFunctor(lidar_point, lidar_normal, weight));
+  }
+
+  Eigen::Vector3d lidar_point_;
+  Eigen::Vector3d lidar_normal_;
+  double weight_;
+};
+
+void SavePointsToPLY(const std::vector<Eigen::Vector3d>& points,
+                     const std::string& filename) {
+  std::filebuf fb;
+  fb.open(filename, std::ios::out | std::ios::binary);
+  std::ostream os(&fb);
+
+  tinyply::PlyFile ply_file;
+
+  std::vector<float> vertices;
+  vertices.reserve(points.size() * 3);
+  for (const auto& point : points) {
+    vertices.push_back(static_cast<float>(point.x()));
+    vertices.push_back(static_cast<float>(point.y()));
+    vertices.push_back(static_cast<float>(point.z()));
+  }
+
+  ply_file.add_properties_to_element(
+      "vertex",
+      {"x", "y", "z"},
+      tinyply::Type::FLOAT32,
+      vertices.size() / 3,
+      reinterpret_cast<uint8_t*>(vertices.data()),
+      tinyply::Type::INVALID,
+      0);
+
+  ply_file.write(os, true);
+
+  fb.close();
+}
+
+void SavePointsToPLY(const std::vector<Point>& points,
+                     const std::string& filename) {
+  std::filebuf fb;
+  fb.open(filename, std::ios::out | std::ios::binary);
+  std::ostream os(&fb);
+
+  tinyply::PlyFile ply_file;
+
+  std::vector<float> vertices;
+  std::vector<float> normals;
+  vertices.reserve(points.size() * 3);
+  normals.reserve(points.size() * 3);
+
+  for (const auto& point : points) {
+    vertices.push_back(static_cast<float>(point.position.x()));
+    vertices.push_back(static_cast<float>(point.position.y()));
+    vertices.push_back(static_cast<float>(point.position.z()));
+
+    normals.push_back(static_cast<float>(point.normal.x()));
+    normals.push_back(static_cast<float>(point.normal.y()));
+    normals.push_back(static_cast<float>(point.normal.z()));
+  }
+
+  ply_file.add_properties_to_element(
+      "vertex",
+      {"x", "y", "z"},
+      tinyply::Type::FLOAT32,
+      vertices.size() / 3,
+      reinterpret_cast<uint8_t*>(vertices.data()),
+      tinyply::Type::INVALID,
+      0);
+
+  ply_file.add_properties_to_element("vertex",
+                                     {"nx", "ny", "nz"},
+                                     tinyply::Type::FLOAT32,
+                                     normals.size() / 3,
+                                     reinterpret_cast<uint8_t*>(normals.data()),
+                                     tinyply::Type::INVALID,
+                                     0);
+
+  // 写入文件
+  ply_file.write(os, true);
+
+  fb.close();
+}
+
+void LidarPriorBundleAdjuster::AddLidarPositionPriorConstraints(
+    const std::vector<Point> points3D,
     const Sim3d& normalized_from_metric,
-    std::unordered_map<image_t, Image>& images) {
-  const int num_images = images.size();
+    std::unordered_map<track_t, Track>& tracks) {
+  const int num_tracks = tracks.size();
 
-  // Add pose position prior constraints
-  for (auto& [image_id, image] : images) {
-    const colmap::PosePrior& pose_prior = pose_priors.at(image_id);
-    ceres::CostFunction* cost_function = colmap::CovarianceWeightedCostFunctor<
-        colmap::AbsolutePosePositionPriorCostFunctor>::
-        Create(pose_prior.position_covariance,
-               normalized_from_metric * pose_prior.position);
+  if (points3D.empty()) {
+    LOG(WARNING) << "No 3D points provided for LIDAR prior constraints";
+    return;
+  }
 
-    if (cost_function != nullptr) {
-      problem_->AddResidualBlock(
-          cost_function,
-          prior_options_.prior_position_loss_function.get(),
-          image.cam_from_world.rotation.coeffs().data(),
-          image.cam_from_world.translation.data());
-    } else {
-      LOG(ERROR) << "Could not create position prior cost function for image: "
-                 << image_id;
+  // Create a point cloud adaptor for nanoflann
+  std::vector<Point> points3D_transformed;
+  points3D_transformed.reserve(points3D.size());
+  for (const auto& point : points3D) {
+    Point transformed_point;
+    transformed_point.position = normalized_from_metric * point.position;
+    transformed_point.normal = normalized_from_metric.rotation * point.normal;
+    points3D_transformed.push_back(transformed_point);
+  }
+
+  // Create point cloud adaptor instance
+  PointCloudAdaptor pointCloudAdaptor(points3D_transformed);
+
+  // Create KD-tree for 3D points
+  using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+      nanoflann::L2_Simple_Adaptor<double, PointCloudAdaptor>,
+      PointCloudAdaptor,
+      3>;
+
+  KDTree kdtree(
+      3, pointCloudAdaptor, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+  kdtree.buildIndex();
+
+  std::vector<Eigen::Vector3d> points3D_src;
+  std::vector<Point> points3D_dst;
+  points3D_src.reserve(tracks.size());
+  points3D_dst.reserve(tracks.size());
+
+  // Calculate average distance threshold
+  double total_distance = 0.0;
+  int valid_track_count = 0;
+
+  // First pass: calculate average distance
+  for (auto& [track_id, track] : tracks) {
+    if (!track.is_initialized) continue;
+
+    // Query point (the track's 3D position)
+    const Eigen::Vector3d query_point = track.xyz;
+    // Find the nearest neighbor
+    size_t nearest_index;
+    double nearest_distance;
+    nanoflann::KNNResultSet<double> resultSet(1);
+    resultSet.init(&nearest_index, &nearest_distance);
+    kdtree.findNeighbors(resultSet, query_point.data());
+
+    total_distance += std::sqrt(nearest_distance);
+    valid_track_count++;
+  }
+
+  if (valid_track_count == 0) {
+    LOG(WARNING) << "No valid tracks found for LIDAR prior constraints";
+    return;
+  }
+
+  double avg_distance = total_distance / valid_track_count;
+  LOG(INFO) << "Average distance between tracks and LIDAR points: "
+            << avg_distance;
+
+  // Second pass: add constraints only when distance is less than average
+  for (auto& [track_id, track] : tracks) {
+    if (!track.is_initialized) continue;
+
+    // Query point (the track's 3D position)
+    const Eigen::Vector3d query_point = track.xyz;
+    // Find the nearest neighbor
+    size_t nearest_index;
+    double nearest_distance;
+    nanoflann::KNNResultSet<double> resultSet(1);
+    resultSet.init(&nearest_index, &nearest_distance);
+    kdtree.findNeighbors(resultSet, query_point.data());
+
+    // Only add constraint when distance is less than average distance
+    if (std::sqrt(nearest_distance) < avg_distance) {
+      // Add constraint using the nearest LIDAR point
+      const Point& nearest_point = points3D_transformed[nearest_index];
+      points3D_dst.emplace_back(nearest_point);
+      points3D_src.emplace_back(track.xyz);
+      // Create cost function using point-to-plane distance as constraint
+      // ceres::CostFunction* cost_function = PointToPlaneCostFunctor::Create(
+      //     nearest_point.position, nearest_point.normal, 100.0);
+
+      ceres::CostFunction* cost_function = PointToPointCostFunctor::Create(
+      nearest_point.position, 100.0);
+
+      if (cost_function != nullptr) {
+        problem_->AddResidualBlock(
+            cost_function,
+            lidar_options_.prior_lidar_loss_function.get(),
+            track.xyz.data());
+      } else {
+        LOG(ERROR)
+            << "Could not create LIDAR position prior cost function for track: "
+            << track_id;
+      }
     }
   }
+  // std::string output_path =
+  //     "C:/Users/Admin/Desktop/Data/HP300/10-17/output/undistorted_project/"
+  //     "sparse_icp/0";
+  // SavePointsToPLY(points3D_src, output_path + "/points3D_src.ply");
+  // SavePointsToPLY(points3D_dst, output_path + "/points3D_dst.ply");
 }
 }  // namespace glomap

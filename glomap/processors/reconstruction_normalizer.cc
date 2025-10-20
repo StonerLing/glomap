@@ -56,6 +56,7 @@ colmap::Sim3d NormalizeReconstruction(
       scale = extent / old_extent;
     }
   }
+  // colmap::Sim3d tform(1.0, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
   colmap::Sim3d tform(
       scale, Eigen::Quaterniond::Identity(), -scale * mean_coord);
 

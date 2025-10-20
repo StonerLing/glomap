@@ -3,6 +3,7 @@
 #include "glomap/controllers/global_mapper_lidar.h"
 #include "glomap/controllers/option_manager.h"
 #include "glomap/io/colmap_io.h"
+#include "glomap/io/tinyply.h"
 #include "glomap/types.h"
 
 #include <colmap/scene/reconstruction.h>
@@ -17,38 +18,121 @@ namespace {
 std::vector<Point> ReadPoints3D(const std::string& path) {
   std::ifstream stream(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(stream, path);
-  const size_t num_points3D = colmap::ReadBinaryLittleEndian<uint64_t>(&stream);
+
   std::vector<Point> points3D;
-  points3D.reserve(num_points3D);
-  for (size_t i = 0; i < num_points3D; ++i) {
-    colmap::Point3D point3D;
 
-    const colmap::point3D_t point3D_id =
-        colmap::ReadBinaryLittleEndian<colmap::point3D_t>(&stream);
+  tinyply::PlyFile file;
+  file.parse_header(stream);
 
-    point3D.xyz(0) = colmap::ReadBinaryLittleEndian<double>(&stream);
-    point3D.xyz(1) = colmap::ReadBinaryLittleEndian<double>(&stream);
-    point3D.xyz(2) = colmap::ReadBinaryLittleEndian<double>(&stream);
-    point3D.color(0) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
-    point3D.color(1) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
-    point3D.color(2) = colmap::ReadBinaryLittleEndian<uint8_t>(&stream);
-    point3D.error = colmap::ReadBinaryLittleEndian<double>(&stream);
-    const size_t track_length =
-        colmap::ReadBinaryLittleEndian<uint64_t>(&stream);
-    for (size_t j = 0; j < track_length; ++j) {
-      const colmap::image_t image_id =
-          colmap::ReadBinaryLittleEndian<colmap::image_t>(&stream);
-      const colmap::point2D_t point2D_idx =
-          colmap::ReadBinaryLittleEndian<colmap::point2D_t>(&stream);
-      // point3D.track.AddElement(image_id, point2D_idx);
-    }
-    // point3D.track.Compress();
-
-    // Convert to glomap::Point (position only)
-    points3D.emplace_back(
-        Point(Eigen::Vector3d(point3D.xyz(0), point3D.xyz(1), point3D.xyz(2)),
-              Eigen::Vector3d::Zero()));
+  LOG(INFO) << "PLY head info:";
+  for (auto& comment : file.get_comments()) {
+    LOG(INFO) << "comment: " << comment;
   }
+  for (auto& element : file.get_elements()) {
+    LOG(INFO) << "element: " << element.name << " (" << element.size << ")";
+    for (auto& property : element.properties) {
+      LOG(INFO) << "  property: " << property.name;
+    }
+  }
+
+  std::shared_ptr<tinyply::PlyData> vertices, normals;
+
+  try {
+    vertices = file.request_properties_from_element("vertex", {"x", "y", "z"});
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to request vertex properties: " << e.what();
+  }
+
+  try {
+    normals =
+        file.request_properties_from_element("vertex", {"nx", "ny", "nz"});
+  } catch (const std::exception& e) {
+    LOG(INFO) << "Normals not available in PLY file: " << e.what();
+  }
+
+  // Read the data
+  file.read(stream);
+
+  if (!vertices) {
+    LOG(ERROR) << "No vertex data found in PLY file";
+    return points3D;
+  }
+
+  // Check data type
+  if (vertices->t != tinyply::Type::FLOAT32 &&
+      vertices->t != tinyply::Type::FLOAT64) {
+    LOG(ERROR) << "Unsupported vertex data type";
+    return points3D;
+  }
+
+  points3D.reserve(vertices->count);
+
+  const size_t vertexCount = vertices->count;
+  const uint8_t* vertexData = vertices->buffer.get_const();
+
+  // Handle normals if available
+  const uint8_t* normalData = nullptr;
+  size_t normalCount = 0;
+  tinyply::Type normalType = tinyply::Type::INVALID;
+
+  if (normals) {
+    normalData = normals->buffer.get_const();
+    normalCount = normals->count;
+    normalType = normals->t;
+
+    if (normalCount != vertexCount) {
+      LOG(WARNING)
+          << "Normal count does not match vertex count, ignoring normals";
+      normalData = nullptr;
+    }
+
+    if (normalType != tinyply::Type::FLOAT32 &&
+        normalType != tinyply::Type::FLOAT64) {
+      LOG(WARNING) << "Unsupported normal data type, ignoring normals";
+      normalData = nullptr;
+    }
+  }
+
+  const size_t stride =
+      (vertices->t == tinyply::Type::FLOAT32) ? sizeof(float) : sizeof(double);
+  const size_t normalStride =
+      normalData ? ((normalType == tinyply::Type::FLOAT32) ? sizeof(float)
+                                                           : sizeof(double))
+                 : 0;
+
+  for (size_t i = 0; i < vertexCount; ++i) {
+    Eigen::Vector3d position, normal = Eigen::Vector3d::Zero();
+
+    if (vertices->t == tinyply::Type::FLOAT32) {
+      const float* data =
+          reinterpret_cast<const float*>(vertexData + i * 3 * stride);
+      position = Eigen::Vector3d(static_cast<double>(data[0]),
+                                 static_cast<double>(data[1]),
+                                 static_cast<double>(data[2]));
+    } else {  // FLOAT64
+      const double* data =
+          reinterpret_cast<const double*>(vertexData + i * 3 * stride);
+      position = Eigen::Vector3d(data[0], data[1], data[2]);
+    }
+
+    if (normalData) {
+      if (normalType == tinyply::Type::FLOAT32) {
+        const float* data =
+            reinterpret_cast<const float*>(normalData + i * 3 * normalStride);
+        normal = Eigen::Vector3d(static_cast<double>(data[0]),
+                                 static_cast<double>(data[1]),
+                                 static_cast<double>(data[2]));
+      } else {  // FLOAT64
+        const double* data =
+            reinterpret_cast<const double*>(normalData + i * 3 * normalStride);
+        normal = Eigen::Vector3d(data[0], data[1], data[2]);
+      }
+    }
+
+    points3D.emplace_back(Point(position, normal));
+  }
+
+  LOG(INFO) << "Loaded " << points3D.size() << " points from PLY file";
   return points3D;
 }
 
