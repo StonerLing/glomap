@@ -40,6 +40,49 @@ LidarPriorBundleAdjusterOptions ExtractPosePriorBAOptions(
 }
 }  // namespace
 
+// Create KD-tree for 3D points
+using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+    nanoflann::L2_Simple_Adaptor<double, PointCloudAdaptor>,
+    PointCloudAdaptor,
+    3>;
+
+void FilterTracks(const KDTree& kdtree,
+                  std::unordered_map<track_t, Track>& tracks,
+                  double max_distance) {
+  // Calculate average distance threshold
+  double total_distance = 0.0;
+  int valid_track_count = 0;
+  std::vector<track_t> tracks_to_delete;
+
+  // First pass: calculate average distance
+  for (auto& [track_id, track] : tracks) {
+    // Query point (the track's 3D position)
+    const Eigen::Vector3d query_point = track.xyz;
+    // Find the nearest neighbor
+    size_t nearest_index;
+    double nearest_distance;
+    nanoflann::KNNResultSet<double> resultSet(1);
+    resultSet.init(&nearest_index, &nearest_distance);
+    kdtree.findNeighbors(resultSet, query_point.data());
+
+    if (track.observations.size() < 2) {
+      tracks_to_delete.push_back(track_id);
+    } else if (std::sqrt(nearest_distance) > max_distance) {
+      tracks_to_delete.push_back(track_id);
+    } else {
+      total_distance += std::sqrt(nearest_distance);
+      valid_track_count++;
+    }
+  }
+
+  for (auto& track_id : tracks_to_delete) {
+    tracks.erase(track_id);
+  }
+  LOG(INFO) << "Filtered " << tracks_to_delete.size() << ", remain "
+            << tracks.size() << std::endl;
+  LOG(INFO) << "Average distance: " << total_distance / valid_track_count
+            << std::endl;
+}
 bool GlobalLidarMapper::Solve(const colmap::Database& database,
                               ViewGraph& view_graph,
                               std::unordered_map<camera_t, Camera>& cameras,
@@ -214,6 +257,15 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
 
   // 6. Bundle adjustment
   if (!options_.skip_bundle_adjustment) {
+    // Create point cloud adaptor instance
+    PointCloudAdaptor pointCloudAdaptor(points3D);
+
+    KDTree kdtree(
+        3, pointCloudAdaptor, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+    kdtree.buildIndex();
+    double max_distance = 0.1;
+    FilterTracks(kdtree, tracks, max_distance);
+
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running bundle adjustment ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;
@@ -223,17 +275,11 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
     run_timer.Start();
 
     for (int ite = 0; ite < options_.num_iteration_bundle_adjustment; ite++) {
-    // for (int ite = 0; ite < 1; ite++) {
       std::unique_ptr<LidarPriorBundleAdjuster> ba_engine;
 
-      // if (options_.opt_pose_prior.use_pose_position_prior) {
-      //   LidarPriorBundleAdjusterOptions opt_prior_ba =
-      //       ExtractPosePriorBAOptions(options_);
-      //   ba_engine = std::make_unique<LidarPriorBundleAdjuster>(options_.opt_ba,
-      //                                                          opt_prior_ba);
-      // } else {
-      //   ba_engine = std::make_unique<BundleAdjuster>(options_.opt_ba);
-      // }
+      double remain_factor =
+          (options_.num_iteration_bundle_adjustment - ite - 1) /
+          options_.num_iteration_bundle_adjustment;
 
       LidarPriorBundleAdjusterOptions opt_prior_ba =
           ExtractPosePriorBAOptions(options_);
@@ -242,10 +288,17 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
 
       BundleAdjusterOptions& ba_engine_options_inner = ba_engine->GetOptions();
 
+      ba_engine_options_inner.optimize_intrinsics = false;
+      ba_engine_options_inner.optimize_principal_point = false;
       // Staged bundle adjustment
       // 6.1. First stage: optimize positions only
       ba_engine_options_inner.optimize_rotations = false;
-      if (!ba_engine->SolveLidar(view_graph, cameras, images, points3D, tracks)) {
+      if (!ba_engine->SolveLidar(view_graph,
+                                 cameras,
+                                 images,
+                                 points3D,
+                                 tracks,
+                                 10 * remain_factor)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -257,7 +310,12 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       ba_engine_options_inner.optimize_rotations =
           options_.opt_ba.optimize_rotations;
       if (ba_engine_options_inner.optimize_rotations &&
-          !ba_engine->SolveLidar(view_graph, cameras, images, points3D, tracks)) {
+          !ba_engine->SolveLidar(view_graph,
+                                 cameras,
+                                 images,
+                                 points3D,
+                                 tracks,
+                                 1 * remain_factor)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -290,25 +348,25 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       //     ite++;
       // }
       // if (status) {
-      //   LOG(INFO) << "fewer than 0.1% tracks are filtered, stop the iteration.";
-      //   break;
+      //   LOG(INFO) << "fewer than 0.1% tracks are filtered, stop the
+      //   iteration."; break;
       // }
     }
 
-    // Filter tracks based on the estimation
-    UndistortImages(cameras, images, true);
-    LOG(INFO) << "Filtering tracks by reprojection ...";
-    TrackFilter::FilterTracksByReprojection(
-        view_graph,
-        cameras,
-        images,
-        tracks,
-        options_.inlier_thresholds.max_reprojection_error);
-    TrackFilter::FilterTrackTriangulationAngle(
-        view_graph,
-        images,
-        tracks,
-        options_.inlier_thresholds.min_triangulation_angle);
+    // // Filter tracks based on the estimation
+    // UndistortImages(cameras, images, true);
+    // LOG(INFO) << "Filtering tracks by reprojection ...";
+    // TrackFilter::FilterTracksByReprojection(
+    //     view_graph,
+    //     cameras,
+    //     images,
+    //     tracks,
+    //     options_.inlier_thresholds.max_reprojection_error);
+    // TrackFilter::FilterTrackTriangulationAngle(
+    //     view_graph,
+    //     images,
+    //     tracks,
+    //     options_.inlier_thresholds.min_triangulation_angle);
 
     run_timer.PrintSeconds();
   }

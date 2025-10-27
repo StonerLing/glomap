@@ -6,9 +6,10 @@
 
 #include <colmap/geometry/sim3.h>
 
+#include <fstream>
+
 #include <ceres/ceres.h>
 #include <nanoflann.hpp>
-#include <fstream>
 
 namespace glomap {
 
@@ -188,7 +189,8 @@ class LidarPriorBundleAdjuster : public BundleAdjuster {
                   std::unordered_map<camera_t, Camera>& cameras,
                   std::unordered_map<image_t, Image>& images,
                   std::vector<Point> points3D,
-                  std::unordered_map<track_t, Track>& tracks);
+                  std::unordered_map<track_t, Track>& tracks,
+                  double weight);
 
  protected:
   // Allign the reconstruction to pose position priors.
@@ -201,7 +203,8 @@ class LidarPriorBundleAdjuster : public BundleAdjuster {
   void AddLidarPositionPriorConstraints(
       const std::vector<Point> points3D,
       const Sim3d& normalized_from_metric,
-      std::unordered_map<track_t, Track>& tracks);
+      std::unordered_map<track_t, Track>& tracks,
+      double weight);
 
   LidarPriorBundleAdjusterOptions lidar_options_;
   std::unordered_map<image_t, PosePrior> pose_priors_;

@@ -70,6 +70,9 @@ void ConvertGlomapToColmap(const std::unordered_map<camera_t, Camera>& cameras,
 
     // Add track element
     for (auto& observation : track.observations) {
+      if (image_to_point3D.find(observation.first) == image_to_point3D.end()) {
+        continue;
+      }
       const Image& image = images.at(observation.first);
       if (!image.is_registered ||
           (cluster_id != -1 && image.cluster_id != cluster_id))
