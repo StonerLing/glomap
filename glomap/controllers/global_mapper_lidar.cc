@@ -298,7 +298,7 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
                                  images,
                                  points3D,
                                  tracks,
-                                 10 * remain_factor)) {
+                                 200 * remain_factor)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -315,7 +315,7 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
                                  images,
                                  points3D,
                                  tracks,
-                                 1 * remain_factor)) {
+                                 20 * remain_factor)) {
         return false;
       }
       LOG(INFO) << "Global bundle adjustment iteration " << ite + 1 << " / "
@@ -329,7 +329,7 @@ bool GlobalLidarMapper::Solve(const colmap::Database& database,
       // tightened. If only few tracks are changed, no need to start bundle
       // adjustment right away. Instead, use a more strict criteria to filter
       UndistortImages(cameras, images, true);
-      LOG(INFO) << "Filtering tracks by reprojection ...";
+      // LOG(INFO) << "Filtering tracks by reprojection ...";
 
       // bool status = true;
       // size_t filtered_num = 0;
